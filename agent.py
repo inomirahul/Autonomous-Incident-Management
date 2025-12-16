@@ -6,10 +6,10 @@ from anthropic import AsyncAnthropic
 
 AGENT_ID = "incident-agent-v1"
 
-INCIDENT_SERVER = "http://localhost:8001/mcp"
-GITHUB_SERVER   = "http://localhost:8002/mcp"
-JIRA_SERVER     = "http://localhost:8003"
-MEMORY_SERVER   = "http://localhost:8004/mcp"
+INCIDENT_SERVER = os.getenv("INCIDENT_SERVER")
+GITHUB_SERVER   = os.getenv("GITHUB_SERVER")
+JIRA_SERVER     = os.getenv("JIRA_SERVER")
+MEMORY_SERVER   = os.getenv("MEMORY_SERVER")
 
 api_key = os.getenv("ANTHROPIC_API_KEY")
 
@@ -30,6 +30,15 @@ You must:
 
 Do not ask questions.
 Act using tools.
+"""
+
+"""
+| | Required Information | Description | Example |
+| |---------------------|-------------|---------|
+| | **Repository** | GitHub repo with the relevant code | `acme-corp/payment-service` |
+| | **Incident Description** | What's happening? | "500 errors on /api/checkout endpoint" |
+| | **Error Details** | Stack traces, logs, error messages | `NullPointerException at PaymentProcessor.java:142` |
+| | **Affected Service** | Which service/component | "Payment Service", "User Auth" |
 """
 
 # ======================================================

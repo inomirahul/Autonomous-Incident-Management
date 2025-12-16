@@ -1,6 +1,12 @@
 version: "3.9"
 
+volumes:
+  pgdata:
+
 services:
+  # --------------------------------------------------
+  # Database (persistent memory)
+  # --------------------------------------------------
   db:
     image: pgvector/pgvector:pg16
     container_name: agent-db
@@ -9,48 +15,76 @@ services:
       POSTGRES_USER: agent
       POSTGRES_PASSWORD: agent
     ports:
-      - "5432:5432"
+      - "5432:5432"          # optional: expose to host for debugging
     volumes:
       - pgdata:/var/lib/postgresql/data
 
-  agent:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
-    container_name: incident-agent
-    depends_on:
-      - db
+  # --------------------------------------------------
+  # MCP servers
+  # --------------------------------------------------
+  incident-mcp:
+    build: ./servers/incident
+    container_name: incident-mcp
+    ports:
+      - "8001:8001"
     environment:
-      # ---- OpenAI ----
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      SENTRY_API_TOKEN: ${SENTRY_API_TOKEN}
+      DD_API_KEY: ${DD_API_KEY}
+      DD_APP_KEY: ${DD_APP_KEY}
 
-      # ---- GitHub ----
+  github-mcp:
+    build: ./servers/github
+    container_name: github-mcp
+    ports:
+      - "8002:8002"
+    environment:
       GITHUB_TOKEN: ${GITHUB_TOKEN}
 
-      # ---- Jira ----
+  jira-mcp:
+    build: ./servers/jira
+    container_name: jira-mcp
+    ports:
+      - "8003:8003"
+    environment:
       JIRA_SERVER: ${JIRA_SERVER}
       JIRA_EMAIL: ${JIRA_EMAIL}
       JIRA_API_TOKEN: ${JIRA_API_TOKEN}
 
-      # ---- Sentry (optional) ----
-      SENTRY_API_TOKEN: ${SENTRY_API_TOKEN}
-      SENTRY_ORG_SLUG: ${SENTRY_ORG_SLUG}
-
-      # ---- Datadog (optional) ----
-      DD_API_KEY: ${DD_API_KEY}
-      DD_APP_KEY: ${DD_APP_KEY}
-
-      # ---- Agent config ----
-      TARGET_REPO: ${TARGET_REPO}
-      JIRA_PROJECT: ${JIRA_PROJECT}
-      INCIDENT_SOURCE: ${INCIDENT_SOURCE:-sentry}
-
-      MEMORY_DB_URL: postgres://agent:agent@db:5432/agent
+  memory-mcp:
+    build: ./servers/memory
+    container_name: memory-mcp
     ports:
-      - "8001:8001"
-      - "8002:8002"
-      - "8003:8003"
       - "8004:8004"
+    depends_on:
+      - db
+    environment:
+      # IMPORTANT: use service name "db", not localhost
+      MEMORY_DB_URL: postgres://agent:agent@db:5432/agent
+      MEMORY_DB_NAME: agent
+      MEMORY_DB_USER: agent
+      MEMORY_DB_PASSWORD: agent
+      MEMORY_DB_HOST: db
+      MEMORY_DB_PORT: 5432
 
-volumes:
-  pgdata:
+  # --------------------------------------------------
+  # Agent
+  # --------------------------------------------------
+  ai-incident-agent:
+    build:
+      dockerfile: docker/Dockerfile
+    container_name: ai-incident-agent
+    depends_on:
+      - db
+      - incident-mcp
+      - github-mcp
+      - jira-mcp
+      - memory-mcp
+    environment:
+      # MCP endpoints (Docker DNS)
+      INCIDENT_SERVER: http://incident-mcp:8001/mcp
+      GITHUB_SERVER:   http://github-mcp:8002/mcp
+      JIRA_SERVER:     http://jira-mcp:8003/mcp
+      MEMORY_SERVER:   http://memory-mcp:8004/mcp
+
+      # LLM
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}

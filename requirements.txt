@@ -7,4 +7,3 @@ psycopg2-binary
 pgvector
 python-dateutil
 anthropic
-sentence-transformers
