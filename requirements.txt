@@ -1,5 +1,4 @@
 fastmcp
-openai
 datadog-api-client
 PyGithub
 jira

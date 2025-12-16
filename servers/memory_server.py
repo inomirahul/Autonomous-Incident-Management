@@ -1,21 +1,31 @@
+# memory_server.py
 import os
 import psycopg2
 import psycopg2.extras
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from fastmcp import FastMCP
-from openai import OpenAI
 
-client = OpenAI()
+# Anthropic sync client
+from anthropic import Anthropic
+
+client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 conn = psycopg2.connect(os.getenv("MEMORY_DB_URL"))
 conn.autocommit = True
 
 mcp = FastMCP("agent-memory")
 
 def embed(text: str) -> list:
-    return client.embeddings.create(
-        model="text-embedding-3-small",
-        input=text
-    ).data[0].embedding
+    # model name taken from env or fallback to "embed-1"
+    model = os.getenv("ANTHROPIC_EMBED_MODEL", "embed-1")
+    resp = client.embeddings.create(model=model, input=text)
+
+    # support both dict-style and attribute-style SDK responses
+    data = getattr(resp, "data", None) or resp.get("data", [])
+    first = data[0]
+    if isinstance(first, dict):
+        return first.get("embedding")
+    # attribute-style
+    return getattr(first, "embedding", first)
 
 @mcp.tool()
 def write_memory(
