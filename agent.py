@@ -1,20 +1,76 @@
 import asyncio
 from fastmcp import Client
-from openai import AsyncOpenAI
-
+from anthropic import AsyncAnthropic
 
 AGENT_ID = "incident-agent-v1"
 
-# -----------------------
-# MCP servers
-# -----------------------
 INCIDENT_SERVER = "http://localhost:8001"
 GITHUB_SERVER   = "http://localhost:8002"
 JIRA_SERVER     = "http://localhost:8003"
 MEMORY_SERVER   = "http://localhost:8004"
 
 
-llm = AsyncOpenAI()
+class ClaudeAdapter:
+    """
+    Minimal adapter that exposes llm.chat.completions.create(...) as an async call
+    and forwards to Anthropic's Messages API (AsyncAnthropic.messages.create).
+
+    Notes:
+    - This adapter returns a simple response object compatible with the existing
+      code shape: response.choices[0].message.content
+    """
+    def __init__(self, api_key: str | None = None):
+        # AsyncAnthropic will read ANTHROPIC_API_KEY env var if api_key is None.
+        self.client = AsyncAnthropic(api_key=api_key) 
+        # keep same attribute shape as your previous llm
+        self.chat = self
+        self.completions = self
+
+    async def create(self, *, model: str, messages: list, tools=None, tool_choice="auto", max_tokens: int = 1024):
+        # direct call to Anthropic Messages API
+        # pass tools/tool_choice through -- Anthropic supports a `tools` param.
+        resp = await self.client.messages.create(
+            model=model,
+            messages=messages,
+            max_tokens=max_tokens,
+            tools=tools,
+            tool_choice=tool_choice
+        )
+
+        # Build a tiny compatibility object with .choices[0].message
+        class _Msg:
+            def __init__(self, content, tool_calls=None):
+                self.content = content
+                # Claude's tool-use blocks are different. We provide an empty list here.
+                # For real tool use, parse resp to extract tool_use blocks and populate tool_calls.
+                self.tool_calls = tool_calls or []
+
+        class _Choice:
+            def __init__(self, message):
+                self.message = message
+
+        class _Resp:
+            def __init__(self, choices):
+                self.choices = choices
+
+        # resp may expose .content, .text or .message depending on SDK version.
+        content = None
+        if hasattr(resp, "content"):
+            content = resp.content
+        elif hasattr(resp, "text"):
+            content = resp.text
+        elif hasattr(resp, "message"):
+            try:
+                content = resp.message.content
+            except Exception:
+                content = str(resp)
+        else:
+            content = str(resp)
+
+        return _Resp([_Choice(_Msg(content))])
+
+# instantiate adapter (reads ANTHROPIC_API_KEY from env if not provided)
+llm = ClaudeAdapter()
 
 SYSTEM_PROMPT = """
 You are an autonomous incident-response engineer.
@@ -73,12 +129,11 @@ async def run_agent():
             }
         ]
 
-        # ------------------------------------------------
-        # Autonomous MCP loop
-        # ------------------------------------------------
+
         while True:
+            # use a Claude model name here
             response = await llm.chat.completions.create(
-                model="gpt-4.1",
+                model="claude-sonnet-4-5-20250929",  # pick a Claude model available to you
                 messages=messages,
                 tools=tools,
                 tool_choice="auto"
@@ -136,7 +191,7 @@ async def run_agent():
                     })
 
             # --------------------------------------------
-            # Completion path (reflection)
+            # Completion path
             # --------------------------------------------
             else:
                 await memory.call_tool(

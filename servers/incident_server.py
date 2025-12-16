@@ -92,4 +92,4 @@ def get_latest_sentry_issue(org_slug: str, project_slug: Optional[str] = None, s
     return out
 
 if __name__ == "__main__":
-    mcp.run()
+    mcp.run(port=8001)
