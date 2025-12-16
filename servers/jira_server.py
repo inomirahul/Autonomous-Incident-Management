@@ -30,4 +30,8 @@ def create_issue(project_key: str, summary: str, description: str, issuetype: st
         raise RuntimeError(f"Failed to create Jira issue: {e}")
 
 if __name__ == "__main__":
-    mcp.run(port=8003)
+    mcp.run(
+    transport="http",
+    host="0.0.0.0",
+    port=8003
+)

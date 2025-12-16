@@ -1,213 +1,228 @@
 import asyncio
+import os
+from typing import Any
 from fastmcp import Client
 from anthropic import AsyncAnthropic
 
 AGENT_ID = "incident-agent-v1"
 
-INCIDENT_SERVER = "http://localhost:8001"
-GITHUB_SERVER   = "http://localhost:8002"
+INCIDENT_SERVER = "http://localhost:8001/mcp"
+GITHUB_SERVER   = "http://localhost:8002/mcp"
 JIRA_SERVER     = "http://localhost:8003"
-MEMORY_SERVER   = "http://localhost:8004"
+MEMORY_SERVER   = "http://localhost:8004/mcp"
+
+api_key = os.getenv("ANTHROPIC_API_KEY")
 
 
-class ClaudeAdapter:
-    """
-    Minimal adapter that exposes llm.chat.completions.create(...) as an async call
-    and forwards to Anthropic's Messages API (AsyncAnthropic.messages.create).
+claude = AsyncAnthropic()
 
-    Notes:
-    - This adapter returns a simple response object compatible with the existing
-      code shape: response.choices[0].message.content
-    """
-    def __init__(self, api_key: str | None = None):
-        # AsyncAnthropic will read ANTHROPIC_API_KEY env var if api_key is None.
-        self.client = AsyncAnthropic(api_key=api_key) 
-        # keep same attribute shape as your previous llm
-        self.chat = self
-        self.completions = self
-
-    async def create(self, *, model: str, messages: list, tools=None, tool_choice="auto", max_tokens: int = 1024):
-        # direct call to Anthropic Messages API
-        # pass tools/tool_choice through -- Anthropic supports a `tools` param.
-        resp = await self.client.messages.create(
-            model=model,
-            messages=messages,
-            max_tokens=max_tokens,
-            tools=tools,
-            tool_choice=tool_choice
-        )
-
-        # Build a tiny compatibility object with .choices[0].message
-        class _Msg:
-            def __init__(self, content, tool_calls=None):
-                self.content = content
-                # Claude's tool-use blocks are different. We provide an empty list here.
-                # For real tool use, parse resp to extract tool_use blocks and populate tool_calls.
-                self.tool_calls = tool_calls or []
-
-        class _Choice:
-            def __init__(self, message):
-                self.message = message
-
-        class _Resp:
-            def __init__(self, choices):
-                self.choices = choices
-
-        # resp may expose .content, .text or .message depending on SDK version.
-        content = None
-        if hasattr(resp, "content"):
-            content = resp.content
-        elif hasattr(resp, "text"):
-            content = resp.text
-        elif hasattr(resp, "message"):
-            try:
-                content = resp.message.content
-            except Exception:
-                content = str(resp)
-        else:
-            content = str(resp)
-
-        return _Resp([_Choice(_Msg(content))])
-
-# instantiate adapter (reads ANTHROPIC_API_KEY from env if not provided)
-llm = ClaudeAdapter()
+MODEL = "claude-opus-4-5-20251101"
 
 SYSTEM_PROMPT = """
 You are an autonomous incident-response engineer.
 
-You have access to:
-- incident tools
-- GitHub tools
-- Jira tools
-- long-term memory
+You must:
+- Investigate the most recent incident
+- Search relevant code
+- Create Jira issues when appropriate
+- Create GitHub pull requests when appropriate
+- Store incidents, actions, and reflections into memory
 
-Rules:
-- Recall relevant past incidents before acting
-- Use memory only if it is relevant
-- Store decisions, actions, and outcomes
-- Do not ask questions
-- Act decisively
+Do not ask questions.
+Act using tools.
 """
 
+# ======================================================
+# Tool dispatch helper
+# ======================================================
+async def dispatch_tool(
+    name: str,
+    args: dict[str, Any],
+    incident: Client,
+    github: Client,
+    jira: Client,
+    memory: Client,
+    incident_tools,
+    github_tools,
+    jira_tools,
+    memory_tools,
+):
+    if name in incident_tools:
+        return await incident.call_tool(name, args), "incident"
+
+    if name in github_tools:
+        return await github.call_tool(name, args), "action"
+
+    if name in jira_tools:
+        return await jira.call_tool(name, args), "action"
+
+    if name in memory_tools:
+        return await memory.call_tool(name, args), None
+
+    raise RuntimeError(f"Unknown tool: {name}")
+
+
+def mcp_tool_to_claude(tool):
+    """
+    Convert FastMCP Tool -> Claude tool schema
+    """
+    return {
+        "name": tool.name,
+        "description": tool.description or "",
+        "input_schema": tool.inputSchema or {
+            "type": "object",
+            "properties": {},
+        },
+    }
+
+
+
+# ======================================================
+# Agent loop
+# ======================================================
 async def run_agent():
     async with (
         Client(INCIDENT_SERVER) as incident,
         Client(GITHUB_SERVER) as github,
         Client(JIRA_SERVER) as jira,
-        Client(MEMORY_SERVER) as memory
+        Client(MEMORY_SERVER) as memory,
     ):
-        # ------------------------------------------------
-        # Tool registry (MCP contracts)
-        # ------------------------------------------------
-        tools = (
-            incident.tools +
-            github.tools +
-            jira.tools +
-            memory.tools
-        )
+        # ----------------------------------------------
+        # Discover tools (MCP-correct)
+        # ----------------------------------------------
+        incident_tool_objs = await incident.list_tools()
+        github_tool_objs   = await github.list_tools()
+        jira_tool_objs     = await jira.list_tools()
+        memory_tool_objs   = await memory.list_tools()
 
-        # ------------------------------------------------
-        # RAG: semantic recall BEFORE reasoning
-        # ------------------------------------------------
-        rag_context = await memory.call_tool(
-            "rag_context",
+        incident_tools = {t.name for t in incident_tool_objs}
+        github_tools   = {t.name for t in github_tool_objs}
+        jira_tools     = {t.name for t in jira_tool_objs}
+        memory_tools   = {t.name for t in memory_tool_objs}
+
+        claude_tools = [
+            mcp_tool_to_claude(t)
+            for t in (
+                github_tool_objs
+                + incident_tool_objs
+                + jira_tool_objs
+                + memory_tool_objs
+            )
+        ]
+        # ----------------------------------------------
+        # Recall past memory (symbolic)
+        # ----------------------------------------------
+        past_memory = await memory.call_tool(
+            "recall_memory",
             {
                 "agent_id": AGENT_ID,
-                "query": "production incident remediation"
-            }
+                "limit": 10,
+            },
         )
 
+        system_prompt = SYSTEM_PROMPT + "\n\nPast memory:\n" + str(past_memory)
+
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "system",
-                "content": f"Relevant long-term memory (may be empty):\n{rag_context}"
-            },
             {
                 "role": "user",
                 "content": "Handle the most recent production incident end-to-end."
             }
         ]
 
-
+        # ----------------------------------------------
+        # Autonomous loop
+        # ----------------------------------------------
         while True:
-            # use a Claude model name here
-            response = await llm.chat.completions.create(
-                model="claude-sonnet-4-5-20250929",  # pick a Claude model available to you
+            response = await claude.messages.create(
+                model=MODEL,
+                system=system_prompt,
                 messages=messages,
-                tools=tools,
-                tool_choice="auto"
+                tools=claude_tools,
+                max_tokens=2048,
             )
 
-            msg = response.choices[0].message
+            # ALWAYS append the assistant message first
+            assistant_message = {
+                "role": "assistant",
+                "content": response.content,
+            }
+            messages.append(assistant_message)
 
-            # --------------------------------------------
-            # Tool execution path
-            # --------------------------------------------
-            if msg.tool_calls:
-                for call in msg.tool_calls:
-                    tool_name = call.function.name
-                    tool_args = call.function.arguments
+            # Look for a tool_use in THIS assistant message
+            tool_block = None
+            for block in response.content:
+                if block.type == "tool_use":
+                    tool_block = block
+                    break
 
-                    if tool_name in incident.tool_map:
-                        result = await incident.call_tool(tool_name, tool_args)
-                        memory_type = "incident"
+            # ------------------------------------------------
+            # Tool path (exactly one tool_use)
+            # ------------------------------------------------
+            if tool_block:
+                tool_name = tool_block.name
+                tool_args = tool_block.input
 
-                    elif tool_name in github.tool_map:
-                        result = await github.call_tool(tool_name, tool_args)
-                        memory_type = "action"
+                result, memory_type = await dispatch_tool(
+                    tool_name,
+                    tool_args,
+                    incident,
+                    github,
+                    jira,
+                    memory,
+                    incident_tools,
+                    github_tools,
+                    jira_tools,
+                    memory_tools,
+                )
 
-                    elif tool_name in jira.tool_map:
-                        result = await jira.call_tool(tool_name, tool_args)
-                        memory_type = "action"
-
-                    elif tool_name in memory.tool_map:
-                        result = await memory.call_tool(tool_name, tool_args)
-                        memory_type = None  # already memory
-
-                    else:
-                        raise RuntimeError(f"Unknown tool: {tool_name}")
-
-                    # ---- persist episodic memory automatically ----
-                    if memory_type:
-                        await memory.call_tool(
-                            "write_memory",
-                            {
-                                "agent_id": AGENT_ID,
-                                "memory_type": memory_type,
-                                "content": {
-                                    "tool": tool_name,
-                                    "arguments": tool_args,
-                                    "result": result
-                                }
-                            }
-                        )
-
-                    messages.append(msg)
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": call.id,
-                        "content": str(result)
-                    })
-
-            # --------------------------------------------
-            # Completion path
-            # --------------------------------------------
-            else:
-                await memory.call_tool(
-                    "write_memory",
-                    {
-                        "agent_id": AGENT_ID,
-                        "memory_type": "reflection",
-                        "content": {
-                            "summary": msg.content
+                if memory_type:
+                    await memory.call_tool(
+                        "write_memory",
+                        {
+                            "agent_id": AGENT_ID,
+                            "memory_type": memory_type,
+                            "content": {
+                                "tool": tool_name,
+                                "arguments": tool_args,
+                                "result": result,
+                            },
                         }
+                    )
+
+                # NOW append the tool_result as a USER message
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": tool_block.id,
+                                "content": str(result),
+                            }
+                        ],
                     }
                 )
 
-                print(msg.content)
-                break
+                continue  # go back to Claude with correct state
 
+            # ------------------------------------------------
+            # No tool_use → final answer
+            # ------------------------------------------------
+            final_text = ""
+            for block in response.content:
+                if block.type == "text":
+                    final_text += block.text
 
+            await memory.call_tool(
+                "write_memory",
+                {
+                    "agent_id": AGENT_ID,
+                    "memory_type": "reflection",
+                    "content": {"summary": final_text},
+                }
+            )
+
+            print(final_text)
+            break
 if __name__ == "__main__":
     asyncio.run(run_agent())

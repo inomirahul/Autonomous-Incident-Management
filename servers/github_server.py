@@ -60,4 +60,8 @@ def create_pull_request(repo_full_name: str, title: str, body: str, head_branch:
     return {"pr_number": pr.number, "pr_url": pr.html_url}
 
 if __name__ == "__main__":
-    mcp.run(port=8002)
+    mcp.run(
+    transport="http",
+    host="0.0.0.0",
+    port=8002
+)

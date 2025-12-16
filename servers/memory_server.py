@@ -5,76 +5,68 @@ import psycopg2.extras
 from typing import List, Dict, Any
 from fastmcp import FastMCP
 
-# Anthropic sync client
-from anthropic import Anthropic
 
-client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-conn = psycopg2.connect(os.getenv("MEMORY_DB_URL"))
+conn = psycopg2.connect(
+    dbname="agent",
+    user="agent",
+    password="agent",
+    host="localhost",
+    port=5432,
+)
 conn.autocommit = True
 
 mcp = FastMCP("agent-memory")
-
-def embed(text: str) -> list:
-    # model name taken from env or fallback to "embed-1"
-    model = os.getenv("ANTHROPIC_EMBED_MODEL", "embed-1")
-    resp = client.embeddings.create(model=model, input=text)
-
-    # support both dict-style and attribute-style SDK responses
-    data = getattr(resp, "data", None) or resp.get("data", [])
-    first = data[0]
-    if isinstance(first, dict):
-        return first.get("embedding")
-    # attribute-style
-    return getattr(first, "embedding", first)
 
 @mcp.tool()
 def write_memory(
     agent_id: str,
     memory_type: str,
-    content: Dict[str, Any],
-    semantic: bool = True
+    content: Dict[str, Any]
 ):
-    vector = embed(str(content)) if semantic else None
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO agent_memory (agent_id, memory_type, content, embedding)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO agent_memory (agent_id, memory_type, content)
+            VALUES (%s, %s, %s)
             """,
-            (agent_id, memory_type, psycopg2.extras.Json(content), vector)
+            (agent_id, memory_type, psycopg2.extras.Json(content))
         )
     return {"status": "stored"}
 
 @mcp.tool()
-def semantic_recall(
+def recall_memory(
     agent_id: str,
-    query: str,
-    limit: int = 5
+    memory_type: str | None = None,
+    limit: int = 20
 ) -> List[Dict[str, Any]]:
-    qvec = embed(query)
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(
-            """
-            SELECT memory_type, content, created_at
-            FROM agent_memory
-            WHERE agent_id = %s
-            ORDER BY embedding <=> %s
-            LIMIT %s
-            """,
-            (agent_id, qvec, limit)
-        )
+        if memory_type:
+            cur.execute(
+                """
+                SELECT memory_type, content, created_at
+                FROM agent_memory
+                WHERE agent_id = %s AND memory_type = %s
+                ORDER BY created_at DESC
+                LIMIT %s
+                """,
+                (agent_id, memory_type, limit)
+            )
+        else:
+            cur.execute(
+                """
+                SELECT memory_type, content, created_at
+                FROM agent_memory
+                WHERE agent_id = %s
+                ORDER BY created_at DESC
+                LIMIT %s
+                """,
+                (agent_id, limit)
+            )
         return cur.fetchall()
 
-@mcp.tool()
-def rag_context(
-    agent_id: str,
-    query: str
-) -> str:
-    memories = semantic_recall(agent_id, query, limit=8)
-    blocks = []
-    for m in memories:
-        blocks.append(f"[{m['memory_type']}] {m['content']}")
-    return "\n".join(blocks)
-
 if __name__ == "__main__":
-    mcp.run(port=8004)
+    mcp.run(
+    transport="http",
+    host="0.0.0.0",
+    port=8004
+)
