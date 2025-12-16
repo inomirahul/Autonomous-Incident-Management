@@ -7,11 +7,11 @@ from fastmcp import FastMCP
 
 
 conn = psycopg2.connect(
-    dbname="agent",
-    user="agent",
-    password="agent",
-    host="localhost",
-    port=5432,
+    dbname=os.getenv("MEMORY_DB_NAME"),
+    user=os.getenv("MEMORY_DB_USER"),
+    password=os.getenv("MEMORY_DB_PASSWORD"),
+    host=os.getenv("MEMORY_DB_HOST"),
+    port=os.getenv("MEMORY_DB_PORT"),
 )
 conn.autocommit = True
 
