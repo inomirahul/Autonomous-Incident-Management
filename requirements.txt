@@ -1,0 +1,9 @@
+fastmcp
+openai
+datadog-api-client
+PyGithub
+jira
+requests
+psycopg2-binary
+pgvector
+python-dateutil

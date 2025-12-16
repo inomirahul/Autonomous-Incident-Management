@@ -1,0 +1,56 @@
+version: "3.9"
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: agent-db
+    environment:
+      POSTGRES_DB: agent
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD: agent
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  agent:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: incident-agent
+    depends_on:
+      - db
+    environment:
+      # ---- OpenAI ----
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+
+      # ---- GitHub ----
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
+
+      # ---- Jira ----
+      JIRA_SERVER: ${JIRA_SERVER}
+      JIRA_EMAIL: ${JIRA_EMAIL}
+      JIRA_API_TOKEN: ${JIRA_API_TOKEN}
+
+      # ---- Sentry (optional) ----
+      SENTRY_API_TOKEN: ${SENTRY_API_TOKEN}
+      SENTRY_ORG_SLUG: ${SENTRY_ORG_SLUG}
+
+      # ---- Datadog (optional) ----
+      DD_API_KEY: ${DD_API_KEY}
+      DD_APP_KEY: ${DD_APP_KEY}
+
+      # ---- Agent config ----
+      TARGET_REPO: ${TARGET_REPO}
+      JIRA_PROJECT: ${JIRA_PROJECT}
+      INCIDENT_SOURCE: ${INCIDENT_SOURCE:-sentry}
+
+      MEMORY_DB_URL: postgres://agent:agent@db:5432/agent
+    ports:
+      - "8001:8001"
+      - "8002:8002"
+      - "8003:8003"
+      - "8004:8004"
+
+volumes:
+  pgdata:
