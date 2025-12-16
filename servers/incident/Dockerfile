@@ -4,8 +4,8 @@ WORKDIR /app
 
 RUN pip install fastmcp datadog-api-client requests python-dateutil
 
-COPY incident_server.py .
+COPY mock_incident_server.py .
 
 EXPOSE 8001
 
-CMD ["python", "incident_server.py"]
+CMD ["python", "mock_incident_server.py"]

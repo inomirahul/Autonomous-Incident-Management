@@ -55,3 +55,8 @@ SENTRY_ORG_SLUG=your-org
 
 DD_API_KEY=...
 DD_APP_KEY=...
+```
+
+### Run agent
+
+`docker compose up --build`

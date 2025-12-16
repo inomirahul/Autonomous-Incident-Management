@@ -1,20 +1,30 @@
 import asyncio
 import os
+import time
+import logging
 from typing import Any
+
 from fastmcp import Client
 from anthropic import AsyncAnthropic
 
+# ======================================================
+# Logging (reach-safe)
+# ======================================================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+log = logging.getLogger("incident-agent")
+
+# ======================================================
+# Configuration
+# ======================================================
 AGENT_ID = "incident-agent-v1"
 
 INCIDENT_SERVER = os.getenv("INCIDENT_SERVER")
 GITHUB_SERVER   = os.getenv("GITHUB_SERVER")
 JIRA_SERVER     = os.getenv("JIRA_SERVER")
 MEMORY_SERVER   = os.getenv("MEMORY_SERVER")
-
-api_key = os.getenv("ANTHROPIC_API_KEY")
-
-
-claude = AsyncAnthropic()
 
 MODEL = "claude-opus-4-5-20251101"
 
@@ -25,56 +35,76 @@ You must:
 - Investigate the most recent incident
 - Search relevant code
 - Create Jira issues when appropriate
-- Create GitHub pull requests when appropriate
+- Create GitHub pull requests when appropriate, decide appropriate branch names, commit messages, and PR titles
 - Store incidents, actions, and reflections into memory
 
 Do not ask questions.
 Act using tools.
 """
 
-"""
-| | Required Information | Description | Example |
-| |---------------------|-------------|---------|
-| | **Repository** | GitHub repo with the relevant code | `acme-corp/payment-service` |
-| | **Incident Description** | What's happening? | "500 errors on /api/checkout endpoint" |
-| | **Error Details** | Stack traces, logs, error messages | `NullPointerException at PaymentProcessor.java:142` |
-| | **Affected Service** | Which service/component | "Payment Service", "User Auth" |
-"""
+claude = AsyncAnthropic()
+
+log.info("startup", extra={
+    "agent_id": AGENT_ID,
+    "incident_server": INCIDENT_SERVER,
+    "github_server": GITHUB_SERVER,
+    "jira_server": JIRA_SERVER,
+    "memory_server": MEMORY_SERVER,
+    "model": MODEL,
+})
 
 # ======================================================
 # Tool dispatch helper
 # ======================================================
 async def dispatch_tool(
     name: str,
-    args: dict[str, Any],
+    tool_args: dict[str, Any],
     incident: Client,
     github: Client,
-    jira: Client,
     memory: Client,
     incident_tools,
     github_tools,
-    jira_tools,
     memory_tools,
 ):
+    log.info("tool.dispatch", extra={
+        "tool": name,
+        "tool_args": tool_args,
+    })
+
     if name in incident_tools:
-        return await incident.call_tool(name, args), "incident"
+        result = await incident.call_tool(name, tool_args)
+        log.info("tool.result", extra={
+            "tool": name,
+            "domain": "incident",
+            "tool_result": str(result),
+        })
+        return result, "incident"
 
     if name in github_tools:
-        return await github.call_tool(name, args), "action"
-
-    if name in jira_tools:
-        return await jira.call_tool(name, args), "action"
+        result = await github.call_tool(name, tool_args)
+        log.info("tool.result", extra={
+            "tool": name,
+            "domain": "github",
+            "tool_result": str(result),
+        })
+        return result, "action"
 
     if name in memory_tools:
-        return await memory.call_tool(name, args), None
+        result = await memory.call_tool(name, tool_args)
+        log.info("tool.result", extra={
+            "tool": name,
+            "domain": "memory",
+            "tool_result": str(result),
+        })
+        return result, None
 
+    log.error("tool.unknown", extra={"tool": name})
     raise RuntimeError(f"Unknown tool: {name}")
 
-
+# ======================================================
+# MCP → Claude tool conversion
+# ======================================================
 def mcp_tool_to_claude(tool):
-    """
-    Convert FastMCP Tool -> Claude tool schema
-    """
     return {
         "name": tool.name,
         "description": tool.description or "",
@@ -84,8 +114,6 @@ def mcp_tool_to_claude(tool):
         },
     }
 
-
-
 # ======================================================
 # Agent loop
 # ======================================================
@@ -93,33 +121,36 @@ async def run_agent():
     async with (
         Client(INCIDENT_SERVER) as incident,
         Client(GITHUB_SERVER) as github,
-        Client(JIRA_SERVER) as jira,
         Client(MEMORY_SERVER) as memory,
     ):
         # ----------------------------------------------
-        # Discover tools (MCP-correct)
+        # Discover tools
         # ----------------------------------------------
         incident_tool_objs = await incident.list_tools()
         github_tool_objs   = await github.list_tools()
-        jira_tool_objs     = await jira.list_tools()
         memory_tool_objs   = await memory.list_tools()
 
         incident_tools = {t.name for t in incident_tool_objs}
         github_tools   = {t.name for t in github_tool_objs}
-        jira_tools     = {t.name for t in jira_tool_objs}
         memory_tools   = {t.name for t in memory_tool_objs}
+
+        log.info("tools.discovered", extra={
+            "incident_tools": sorted(incident_tools),
+            "github_tools": sorted(github_tools),
+            "memory_tools": sorted(memory_tools),
+        })
 
         claude_tools = [
             mcp_tool_to_claude(t)
             for t in (
                 github_tool_objs
                 + incident_tool_objs
-                + jira_tool_objs
                 + memory_tool_objs
             )
         ]
+
         # ----------------------------------------------
-        # Recall past memory (symbolic)
+        # Recall memory
         # ----------------------------------------------
         past_memory = await memory.call_tool(
             "recall_memory",
@@ -129,12 +160,16 @@ async def run_agent():
             },
         )
 
+        log.info("memory.recalled", extra={
+            "memory_raw": str(past_memory),
+        })
+
         system_prompt = SYSTEM_PROMPT + "\n\nPast memory:\n" + str(past_memory)
 
         messages = [
             {
                 "role": "user",
-                "content": "Handle the most recent production incident end-to-end."
+                "content": "Handle the most recent production incident end-to-end.",
             }
         ]
 
@@ -142,6 +177,11 @@ async def run_agent():
         # Autonomous loop
         # ----------------------------------------------
         while True:
+            log.info("model.call", extra={
+                "message_count": len(messages),
+            })
+
+            t0 = time.time()
             response = await claude.messages.create(
                 model=MODEL,
                 system=system_prompt,
@@ -149,74 +189,86 @@ async def run_agent():
                 tools=claude_tools,
                 max_tokens=2048,
             )
+            latency_ms = int((time.time() - t0) * 1000)
 
-            # ALWAYS append the assistant message first
-            assistant_message = {
-                "role": "assistant",
-                "content": response.content,
-            }
-            messages.append(assistant_message)
+            log.info("model.response", extra={
+                "latency_ms": latency_ms,
+                "content_blocks": [getattr(b, "type", None) for b in response.content],
+            })
 
-            # Look for a tool_use in THIS assistant message
-            tool_block = None
-            for block in response.content:
-                if block.type == "tool_use":
-                    tool_block = block
-                    break
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": response.content,
+                }
+            )
 
-            # ------------------------------------------------
-            # Tool path (exactly one tool_use)
-            # ------------------------------------------------
-            if tool_block:
-                tool_name = tool_block.name
-                tool_args = tool_block.input
+            tool_uses = [
+                block for block in response.content
+                if getattr(block, "type", None) == "tool_use"
+            ]
 
-                result, memory_type = await dispatch_tool(
-                    tool_name,
-                    tool_args,
-                    incident,
-                    github,
-                    jira,
-                    memory,
-                    incident_tools,
-                    github_tools,
-                    jira_tools,
-                    memory_tools,
-                )
+            log.info("model.tool_use.detected", extra={
+                "count": len(tool_uses),
+                "tools": [t.name for t in tool_uses],
+            })
 
-                if memory_type:
-                    await memory.call_tool(
-                        "write_memory",
-                        {
-                            "agent_id": AGENT_ID,
+            if tool_uses:
+                tool_result_blocks = []
+
+                for tool_block in tool_uses:
+                    tool_name = tool_block.name
+                    tool_args = tool_block.input
+
+                    result, memory_type = await dispatch_tool(
+                        tool_name,
+                        tool_args,
+                        incident,
+                        github,
+                        memory,
+                        incident_tools,
+                        github_tools,
+                        memory_tools,
+                    )
+
+                    if memory_type:
+                        await memory.call_tool(
+                            "write_memory",
+                            {
+                                "agent_id": AGENT_ID,
+                                "memory_type": memory_type,
+                                "content": {
+                                    "tool": tool_name,
+                                    "arguments": tool_args,
+                                    "result": result,
+                                },
+                            }
+                        )
+                        log.info("memory.write", extra={
                             "memory_type": memory_type,
-                            "content": {
-                                "tool": tool_name,
-                                "arguments": tool_args,
-                                "result": result,
-                            },
+                            "tool": tool_name,
+                        })
+
+                    tool_result_blocks.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tool_block.id,
+                            "content": str(result),
                         }
                     )
 
-                # NOW append the tool_result as a USER message
                 messages.append(
                     {
                         "role": "user",
-                        "content": [
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": tool_block.id,
-                                "content": str(result),
-                            }
-                        ],
+                        "content": tool_result_blocks,
                     }
                 )
 
-                continue  # go back to Claude with correct state
+                continue
 
-            # ------------------------------------------------
-            # No tool_use → final answer
-            # ------------------------------------------------
+            # ----------------------------------------------
+            # Final response
+            # ----------------------------------------------
             final_text = ""
             for block in response.content:
                 if block.type == "text":
@@ -231,7 +283,19 @@ async def run_agent():
                 }
             )
 
+            log.info("memory.write.final", extra={
+                "summary_len": len(final_text),
+            })
+
+            log.info("agent.complete", extra={
+                "final_text": final_text,
+            })
+
             print(final_text)
             break
+
+# ======================================================
+# Entry
+# ======================================================
 if __name__ == "__main__":
     asyncio.run(run_agent())

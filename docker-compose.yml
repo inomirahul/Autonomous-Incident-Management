@@ -40,15 +40,15 @@ services:
     environment:
       GITHUB_TOKEN: ${GITHUB_TOKEN}
 
-  jira-mcp:
-    build: ./servers/jira
-    container_name: jira-mcp
-    ports:
-      - "8003:8003"
-    environment:
-      JIRA_SERVER: ${JIRA_SERVER}
-      JIRA_EMAIL: ${JIRA_EMAIL}
-      JIRA_API_TOKEN: ${JIRA_API_TOKEN}
+  # jira-mcp:
+  #   build: ./servers/jira
+  #   container_name: jira-mcp
+  #   ports:
+  #     - "8003:8003"
+  #   environment:
+  #     JIRA_SERVER: ${JIRA_SERVER}
+  #     JIRA_EMAIL: ${JIRA_EMAIL}
+  #     JIRA_API_TOKEN: ${JIRA_API_TOKEN}
 
   memory-mcp:
     build: ./servers/memory
@@ -77,7 +77,7 @@ services:
       - db
       - incident-mcp
       - github-mcp
-      - jira-mcp
+      # - jira-mcp
       - memory-mcp
     environment:
       # MCP endpoints (Docker DNS)

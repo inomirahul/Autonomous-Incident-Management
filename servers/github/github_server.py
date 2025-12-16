@@ -59,6 +59,51 @@ def create_pull_request(repo_full_name: str, title: str, body: str, head_branch:
     pr = repo.create_pull(title=title, body=body, head=head_branch, base=base_branch)
     return {"pr_number": pr.number, "pr_url": pr.html_url}
 
+
+@mcp.tool()
+def patch_file(
+    repo_full_name: str,
+    branch: str,
+    file_path: str,
+    patch_fn: str,
+    commit_message: str,
+) -> Dict[str, Any]:
+    """
+    Patch an existing file by applying a Python transform function to its content.
+
+    patch_fn: string of Python code defining:
+        def apply(old: str) -> str
+    """
+    repo = gh.get_repo(repo_full_name)
+
+    contents = repo.get_contents(file_path, ref=branch)
+    old_content = contents.decoded_content.decode("utf-8")
+
+    scope: Dict[str, Any] = {}
+    exec(patch_fn, scope)
+    if "apply" not in scope:
+        raise ValueError("patch_fn must define apply(old: str) -> str")
+
+    new_content = scope["apply"](old_content)
+
+    if new_content == old_content:
+        return {"branch": branch, "changed": False}
+
+    res = repo.update_file(
+        path=file_path,
+        message=commit_message,
+        content=new_content,
+        sha=contents.sha,
+        branch=branch,
+    )
+
+    return {
+        "branch": branch,
+        "changed": True,
+        "commit_sha": res["commit"].sha,
+    }
+
+
 if __name__ == "__main__":
     mcp.run(
     transport="http",
