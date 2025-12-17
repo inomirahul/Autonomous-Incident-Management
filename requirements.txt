@@ -4,6 +4,5 @@ PyGithub
 jira
 requests
 psycopg2-binary
-pgvector
 python-dateutil
 anthropic

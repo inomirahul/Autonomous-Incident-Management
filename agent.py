@@ -25,21 +25,44 @@ INCIDENT_SERVER = os.getenv("INCIDENT_SERVER")
 GITHUB_SERVER   = os.getenv("GITHUB_SERVER")
 JIRA_SERVER     = os.getenv("JIRA_SERVER")
 MEMORY_SERVER   = os.getenv("MEMORY_SERVER")
+CODE_INDEX_SERVER = os.getenv("CODE_INDEX_SERVER")
+EDITOR_SERVER   = os.getenv("EDITOR_SERVER")
+SHELL_SERVER    = os.getenv("SHELL_SERVER")
 
 MODEL = "claude-opus-4-5-20251101"
 
 SYSTEM_PROMPT = """
-You are an autonomous incident-response engineer.
+You are an autonomous incident-response agent.
 
-You must:
-- Investigate the most recent incident
-- Search relevant code
-- Create Jira issues when appropriate
-- Create GitHub pull requests when appropriate, decide appropriate branch names, commit messages, and PR titles
-- Store incidents, actions, and reflections into memory
+## Hard Execution Limits
+- Maximum internal reasoning time: 60 seconds.
+- If a solution is not reached within this bound, terminate immediately.
+- On termination, respond only with a concise explanation of why the task cannot be completed.
+- Do not continue analysis, exploration, or tool usage after the limit.
+- Do not attempt partial solutions beyond the limit.
 
-Do not ask questions.
-Act using tools.
+## Failure Mode
+- If required information, access, or determinism is insufficient, exit immediately.
+- Failure responses must describe the blocking constraint, not speculation.
+- No fallback reasoning, retries, or alternative exploration.
+
+## Directives
+
+1. Investigate the incident
+2. Search relevant code
+3. Apply minimal fix
+4. Create Jira issue for tracking if appropriate tools are available
+5. Create GitHub PR with clear branch name, commit message, title, description 
+6. Persist incident, actions, and reflections to memory
+
+## Constraints
+
+- Do not ask questions
+- Do not speculate beyond the code
+- Act only through tools when action is required
+- Focus on factual structure
+- Never delete files; document removals in PR description instead
+- Make minimal required changes only
 """
 
 claude = AsyncAnthropic()
@@ -47,9 +70,12 @@ claude = AsyncAnthropic()
 log.info("startup", extra={
     "agent_id": AGENT_ID,
     "incident_server": INCIDENT_SERVER,
-    "github_server": GITHUB_SERVER,
+    # "github_server": GITHUB_SERVER
     "jira_server": JIRA_SERVER,
     "memory_server": MEMORY_SERVER,
+    "code_index_server": CODE_INDEX_SERVER,
+    "editor_server": EDITOR_SERVER,
+    "shell_server": SHELL_SERVER,
     "model": MODEL,
 })
 
@@ -60,11 +86,17 @@ async def dispatch_tool(
     name: str,
     tool_args: dict[str, Any],
     incident: Client,
-    github: Client,
+    # github: Client,
     memory: Client,
+    code_index: Client,
+    editor: Client,
+    shell: Client,
     incident_tools,
-    github_tools,
+    # github_tools,
     memory_tools,
+    code_index_tools,
+    editor_tools,
+    shell_tools,
 ):
     log.info("tool.dispatch", extra={
         "tool": name,
@@ -80,20 +112,47 @@ async def dispatch_tool(
         })
         return result, "incident"
 
-    if name in github_tools:
-        result = await github.call_tool(name, tool_args)
-        log.info("tool.result", extra={
-            "tool": name,
-            "domain": "github",
-            "tool_result": str(result),
-        })
-        return result, "action"
+    # if name in github_tools:
+    #     result = await github.call_tool(name, tool_args)
+    #     log.info("tool.result", extra={
+    #         "tool": name,
+    #         "domain": "github",
+    #         "tool_result": str(result),
+    #     })
+    #     return result, "action"
 
     if name in memory_tools:
         result = await memory.call_tool(name, tool_args)
         log.info("tool.result", extra={
             "tool": name,
             "domain": "memory",
+            "tool_result": str(result),
+        })
+        return result, None
+
+    if name in code_index_tools:
+        result = await code_index.call_tool(name, tool_args)
+        log.info("tool.result", extra={
+            "tool": name,
+            "domain": "code_index",
+            "tool_result": str(result),
+        })
+        return result, None
+
+    if name in editor_tools:
+        result = await editor.call_tool(name, tool_args)
+        log.info("tool.result", extra={
+            "tool": name,
+            "domain": "editor",
+            "tool_result": str(result),
+        })
+        return result, None
+
+    if name in shell_tools:
+        result = await shell.call_tool(name, tool_args)
+        log.info("tool.result", extra={
+            "tool": name,
+            "domain": "shell",
             "tool_result": str(result),
         })
         return result, None
@@ -120,32 +179,47 @@ def mcp_tool_to_claude(tool):
 async def run_agent():
     async with (
         Client(INCIDENT_SERVER) as incident,
-        Client(GITHUB_SERVER) as github,
+        # Client(GITHUB_SERVER) as github,
         Client(MEMORY_SERVER) as memory,
+        Client(CODE_INDEX_SERVER) as code_index,
+        Client(EDITOR_SERVER) as editor,
+        Client(SHELL_SERVER) as shell,
     ):
         # ----------------------------------------------
         # Discover tools
         # ----------------------------------------------
         incident_tool_objs = await incident.list_tools()
-        github_tool_objs   = await github.list_tools()
+        # github_tool_objs   = await github.list_tools()
         memory_tool_objs   = await memory.list_tools()
+        code_index_tool_objs = await code_index.list_tools()
+        editor_tool_objs = await editor.list_tools()
+        shell_tool_objs = await shell.list_tools()
 
         incident_tools = {t.name for t in incident_tool_objs}
-        github_tools   = {t.name for t in github_tool_objs}
+        # github_tools   = {t.name for t in github_tool_objs}
         memory_tools   = {t.name for t in memory_tool_objs}
+        code_index_tools = {t.name for t in code_index_tool_objs}
+        editor_tools = {t.name for t in editor_tool_objs}
+        shell_tools = {t.name for t in shell_tool_objs}
 
         log.info("tools.discovered", extra={
             "incident_tools": sorted(incident_tools),
-            "github_tools": sorted(github_tools),
+            # "github_tools": sorted(github_tools),
             "memory_tools": sorted(memory_tools),
+            "code_index_tools": sorted(code_index_tools),
+            "editor_tools": sorted(editor_tools),
+            "shell_tools": sorted(shell_tools),
         })
 
         claude_tools = [
             mcp_tool_to_claude(t)
             for t in (
-                github_tool_objs
-                + incident_tool_objs
+                incident_tool_objs
                 + memory_tool_objs
+                + code_index_tool_objs
+                + editor_tool_objs
+                + shell_tool_objs
+                # + github_tool_objs
             )
         ]
 
@@ -170,6 +244,10 @@ async def run_agent():
             {
                 "role": "user",
                 "content": "Handle the most recent production incident end-to-end.",
+            },
+            {
+                "role": "user",
+                "content": "Do not send the entire codebase or full file code to LLM. Provide only the minimal, relevant code segments required to diagnose and fix the issue. The LLM should receive targeted excerpts aligned to the specific failure mode, not a full dump. This constrains reasoning, reduces noise, and improves fix accuracy",
             }
         ]
 
@@ -224,11 +302,17 @@ async def run_agent():
                         tool_name,
                         tool_args,
                         incident,
-                        github,
+                        # github,
                         memory,
+                        code_index,
+                        editor,
+                        shell,
                         incident_tools,
-                        github_tools,
+                        # github_tools,
                         memory_tools,
+                        code_index_tools,
+                        editor_tools,
+                        shell_tools,
                     )
 
                     if memory_type:

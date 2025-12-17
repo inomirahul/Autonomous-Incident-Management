@@ -32,13 +32,13 @@ services:
       DD_API_KEY: ${DD_API_KEY}
       DD_APP_KEY: ${DD_APP_KEY}
 
-  github-mcp:
-    build: ./servers/github
-    container_name: github-mcp
-    ports:
-      - "8002:8002"
-    environment:
-      GITHUB_TOKEN: ${GITHUB_TOKEN}
+  # github-mcp:
+  #   build: ./servers/github
+  #   container_name: github-mcp
+  #   ports:
+  #     - "8002:8002"
+  #   environment:
+  #     GITHUB_TOKEN: ${GITHUB_TOKEN}
 
   # jira-mcp:
   #   build: ./servers/jira
@@ -65,6 +65,39 @@ services:
       MEMORY_DB_PASSWORD: agent
       MEMORY_DB_HOST: db
       MEMORY_DB_PORT: 5432
+  
+  code-indexer-mcp:
+    build: ./servers/file
+    container_name: code-indexer-mcp
+    ports:
+      - "8005:8005"
+    environment:
+    - CODE_INDEX_DIR=${CODE_INDEX_DIR}
+    - CODE_INDEX_REPOS=${CODE_INDEX_REPOS}
+    - CODE_INDEX_PATHS=${CODE_INDEX_PATHS}
+    volumes:
+      - ${CODE_INDEX_ROOT}:/host/artemis:ro
+      - ${CODE_INDEX_DIR}:/code_index:rw
+  
+  editor-mcp:
+    build: ./servers/editor
+    container_name: editor-mcp
+    ports:
+      - "8006:8006"
+    volumes:
+      - ${CODE_INDEX_ROOT}:/host/artemis:rw
+    
+  shell-mcp:
+    build: ./servers/shell
+    container_name: shell-mcp
+    ports:
+      - "8007:8007"
+    environment:
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
+      GITHUB_USER: ${GITHUB_USER}
+      GITHUB_EMAIL: ${GITHUB_EMAIL}
+    volumes:
+      - ${CODE_INDEX_ROOT}:/host/artemis:rw
 
   # --------------------------------------------------
   # Agent
@@ -76,15 +109,21 @@ services:
     depends_on:
       - db
       - incident-mcp
-      - github-mcp
+      # - github-mcp
       # - jira-mcp
       - memory-mcp
+      - code-indexer-mcp
+      - editor-mcp
+      - shell-mcp
     environment:
       # MCP endpoints (Docker DNS)
       INCIDENT_SERVER: http://incident-mcp:8001/mcp
       GITHUB_SERVER:   http://github-mcp:8002/mcp
       JIRA_SERVER:     http://jira-mcp:8003/mcp
       MEMORY_SERVER:   http://memory-mcp:8004/mcp
+      CODE_INDEX_SERVER: http://code-indexer-mcp:8005/mcp
+      EDITOR_SERVER:   http://editor-mcp:8006/mcp
+      SHELL_SERVER:    http://shell-mcp:8007/mcp
 
       # LLM
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
