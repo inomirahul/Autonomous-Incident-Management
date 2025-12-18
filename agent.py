@@ -21,6 +21,11 @@ log = logging.getLogger("incident-agent")
 # ======================================================
 AGENT_ID = "incident-agent-v1"
 
+# Token optimization settings
+MAX_RESULT_CHARS = 8000       # Max chars per tool result
+MAX_MESSAGES = 30             # Keep only last N messages (sliding window)
+MAX_MEMORY_CHARS = 4000       # Max chars for past memory in system prompt
+
 INCIDENT_SERVER = os.getenv("INCIDENT_SERVER")
 GITHUB_SERVER   = os.getenv("GITHUB_SERVER")
 JIRA_SERVER     = os.getenv("JIRA_SERVER")
@@ -29,7 +34,7 @@ CODE_INDEX_SERVER = os.getenv("CODE_INDEX_SERVER")
 EDITOR_SERVER   = os.getenv("EDITOR_SERVER")
 SHELL_SERVER    = os.getenv("SHELL_SERVER")
 
-MODEL = "claude-opus-4-5-20251101"
+MODEL = "claude-haiku-4-5-20251001"
 
 SYSTEM_PROMPT = """
 You are an autonomous incident-response agent.
@@ -45,7 +50,14 @@ You are an autonomous incident-response agent.
 ## Failure Mode
 - If required information, access, or determinism is insufficient, exit immediately.
 - Failure responses must describe the blocking constraint, not speculation.
-- No fallback reasoning, retries, or alternative exploration.
+
+## Tool Error Handling
+- When a tool call fails, you will receive an error message with is_error=True.
+- Analyze the error message to understand what went wrong.
+- You may retry the same tool with corrected arguments if the error suggests invalid input.
+- You may try an alternative tool or approach if the original tool is unavailable or broken.
+- After 3 consecutive failures on the same operation, report the blocking issue and move on.
+- Do not give up immediately on first failure - attempt reasonable recovery.
 
 ## Directives
 
@@ -100,79 +112,109 @@ async def dispatch_tool(
     editor_tools,
     shell_tools,
 ):
+    """
+    Dispatch tool call to the appropriate MCP server.
+    Returns (result, memory_type, is_error) tuple.
+    On error, result contains error message and is_error=True.
+    """
     log.info("tool.dispatch", extra={
         "tool": name,
         "tool_args": tool_args,
     })
 
+    async def safe_call(client: Client, tool_name: str, args: dict, domain: str, memory_type=None):
+        """Wrapper that catches exceptions and returns error info."""
+        try:
+            result = await client.call_tool(tool_name, args)
+            log.info("tool.result", extra={
+                "tool": tool_name,
+                "domain": domain,
+                "tool_result": str(result),
+            })
+            return result, memory_type, False
+        except Exception as e:
+            error_msg = f"Tool '{tool_name}' failed with error: {type(e).__name__}: {str(e)}"
+            log.error("tool.error", extra={
+                "tool": tool_name,
+                "domain": domain,
+                "error_type": type(e).__name__,
+                "error_message": str(e),
+            })
+            return error_msg, None, True
+
     if name in incident_tools:
-        result = await incident.call_tool(name, tool_args)
-        log.info("tool.result", extra={
-            "tool": name,
-            "domain": "incident",
-            "tool_result": str(result),
-        })
-        return result, "incident"
+        return await safe_call(incident, name, tool_args, "incident", "incident")
 
     # if name in github_tools:
-    #     result = await github.call_tool(name, tool_args)
-    #     log.info("tool.result", extra={
-    #         "tool": name,
-    #         "domain": "github",
-    #         "tool_result": str(result),
-    #     })
-    #     return result, "action"
+    #     return await safe_call(github, name, tool_args, "github", "action")
 
     if name in memory_tools:
-        result = await memory.call_tool(name, tool_args)
-        log.info("tool.result", extra={
-            "tool": name,
-            "domain": "memory",
-            "tool_result": str(result),
-        })
-        return result, None
+        return await safe_call(memory, name, tool_args, "memory", None)
 
     if name in code_index_tools:
-        result = await code_index.call_tool(name, tool_args)
-        log.info("tool.result", extra={
-            "tool": name,
-            "domain": "code_index",
-            "tool_result": str(result),
-        })
-        return result, None
+        return await safe_call(code_index, name, tool_args, "code_index", None)
 
     if name in editor_tools:
-        result = await editor.call_tool(name, tool_args)
-        log.info("tool.result", extra={
-            "tool": name,
-            "domain": "editor",
-            "tool_result": str(result),
-        })
-        return result, None
+        return await safe_call(editor, name, tool_args, "editor", None)
 
     if name in shell_tools:
-        result = await shell.call_tool(name, tool_args)
-        log.info("tool.result", extra={
-            "tool": name,
-            "domain": "shell",
-            "tool_result": str(result),
-        })
-        return result, None
+        return await safe_call(shell, name, tool_args, "shell", None)
 
     log.error("tool.unknown", extra={"tool": name})
-    raise RuntimeError(f"Unknown tool: {name}")
+    error_msg = f"Unknown tool: {name}. Available tools are in incident, memory, code_index, editor, shell domains."
+    return error_msg, None, True
+
+# ======================================================
+# Result truncation helper
+# ======================================================
+def truncate_result(result: Any, max_chars: int = MAX_RESULT_CHARS) -> str:
+    """
+    Truncate tool result to prevent token overflow.
+    Preserves structure hints for the model.
+    """
+    result_str = str(result)
+    if len(result_str) <= max_chars:
+        return result_str
+
+    # Truncate and add metadata about what was cut
+    truncated = result_str[:max_chars]
+    total_chars = len(result_str)
+    return f"{truncated}\n\n...[TRUNCATED: showing {max_chars}/{total_chars} chars. Request specific portions if needed.]"
+
+
+def truncate_memory(memory_str: str, max_chars: int = MAX_MEMORY_CHARS) -> str:
+    """Truncate past memory for system prompt."""
+    if len(memory_str) <= max_chars:
+        return memory_str
+    return memory_str[:max_chars] + f"\n...[MEMORY TRUNCATED: {len(memory_str)} chars total]"
+
+
+def prune_messages(messages: list, max_messages: int = MAX_MESSAGES) -> list:
+    """
+    Keep only the most recent messages using sliding window.
+    Always preserves the first user message (initial task).
+    """
+    if len(messages) <= max_messages:
+        return messages
+
+    # Keep first message (task) + last (max_messages - 1) messages
+    log.info("message.prune", extra={
+        "original_count": len(messages),
+        "pruned_to": max_messages,
+    })
+    return [messages[0]] + messages[-(max_messages - 1):]
+
 
 # ======================================================
 # MCP → Claude tool conversion
 # ======================================================
 def mcp_tool_to_claude(tool):
+    desc = (tool.description or "").strip()
+    if len(desc) > 800:
+        desc = desc[:797] + "..."
     return {
         "name": tool.name,
-        "description": tool.description or "",
-        "input_schema": tool.inputSchema or {
-            "type": "object",
-            "properties": {},
-        },
+        "description": desc,
     }
 
 # ======================================================
@@ -237,10 +279,12 @@ async def run_agent():
         )
 
         log.info("memory.recalled", extra={
-            "memory_raw": str(past_memory),
+            "memory_raw": str(past_memory)[:500],  # Log only snippet
         })
 
-        system_prompt = SYSTEM_PROMPT + "\n\nPast memory:\n" + str(past_memory)
+        # Truncate memory to prevent token overflow
+        truncated_memory = truncate_memory(str(past_memory))
+        system_prompt = SYSTEM_PROMPT + "\n\nPast memory:\n" + truncated_memory
 
         messages = [
             {
@@ -267,7 +311,7 @@ async def run_agent():
                 system=system_prompt,
                 messages=messages,
                 tools=claude_tools,
-                max_tokens=2048,
+                max_tokens=4096,
             )
             latency_ms = int((time.time() - t0) * 1000)
 
@@ -300,7 +344,7 @@ async def run_agent():
                     tool_name = tool_block.name
                     tool_args = tool_block.input
 
-                    result, memory_type = await dispatch_tool(
+                    result, memory_type, is_error = await dispatch_tool(
                         tool_name,
                         tool_args,
                         incident,
@@ -317,31 +361,42 @@ async def run_agent():
                         shell_tools,
                     )
 
-                    if memory_type:
-                        await memory.call_tool(
-                            "write_memory",
-                            {
-                                "agent_id": AGENT_ID,
+                    # Only write to memory if tool succeeded and has a memory_type
+                    if memory_type and not is_error:
+                        try:
+                            await memory.call_tool(
+                                "write_memory",
+                                {
+                                    "agent_id": AGENT_ID,
+                                    "memory_type": memory_type,
+                                    "content": {
+                                        "tool": tool_name,
+                                        "arguments": tool_args,
+                                        "result": result,
+                                    },
+                                }
+                            )
+                            log.info("memory.write", extra={
                                 "memory_type": memory_type,
-                                "content": {
-                                    "tool": tool_name,
-                                    "arguments": tool_args,
-                                    "result": result,
-                                },
-                            }
-                        )
-                        log.info("memory.write", extra={
-                            "memory_type": memory_type,
-                            "tool": tool_name,
-                        })
+                                "tool": tool_name,
+                            })
+                        except Exception as e:
+                            log.error("memory.write.error", extra={
+                                "tool": tool_name,
+                                "error": str(e),
+                            })
 
-                    tool_result_blocks.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": tool_block.id,
-                            "content": str(result),
-                        }
-                    )
+                    # Build tool result block - TRUNCATE result to prevent token overflow
+                    truncated_content = truncate_result(result)
+                    tool_result_block = {
+                        "type": "tool_result",
+                        "tool_use_id": tool_block.id,
+                        "content": truncated_content,
+                    }
+                    if is_error:
+                        tool_result_block["is_error"] = True
+
+                    tool_result_blocks.append(tool_result_block)
 
                 messages.append(
                     {
@@ -349,6 +404,9 @@ async def run_agent():
                         "content": tool_result_blocks,
                     }
                 )
+
+                # Prune old messages to prevent token overflow (sliding window)
+                messages = prune_messages(messages)
 
                 continue
 
