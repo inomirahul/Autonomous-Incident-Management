@@ -13,24 +13,12 @@ logger = logging.getLogger("whoosh_code_index")
 
 mcp = FastMCP("shell-tools")
 
-# Output truncation limits to prevent token overflow
-MAX_STDOUT_CHARS = 4000
-MAX_STDERR_CHARS = 2000
-
-
-def _truncate_output(text: str, max_chars: int, label: str = "output") -> str:
-    """Truncate output and add indicator if truncated."""
-    if len(text) <= max_chars:
-        return text
-    return text[:max_chars] + f"\n...[{label} TRUNCATED: {len(text)} chars total, showing first {max_chars}]"
-
 
 def _run_shell(cmd: str, cwd: str | None = None, timeout: int = 30) -> Dict[str, Any]:
     """Run a shell command and return a structured result while logging each step.
 
     Returns the same structured dict as before, but logs input arguments, subprocess
     invocation details and truncated outputs for visibility.
-    Output is truncated to prevent token overflow when sent to LLM.
     """
     logger.info("_run_shell called: cmd=%r, cwd=%r, timeout=%s", cmd, cwd, timeout)
     try:
@@ -53,14 +41,13 @@ def _run_shell(cmd: str, cwd: str | None = None, timeout: int = 30) -> Dict[str,
         if stderr_snip:
             logger.info("stderr (snip): %s", stderr_snip.replace('\n', '\\n'))
 
-        # Truncate output in returned dict to prevent LLM token overflow
         return {
             "ok": True,
             "cmd": cmd,
             "cwd": cwd,
             "returncode": rc,
-            "stdout": _truncate_output(proc.stdout, MAX_STDOUT_CHARS, "stdout"),
-            "stderr": _truncate_output(proc.stderr, MAX_STDERR_CHARS, "stderr"),
+            "stdout": proc.stdout,
+            "stderr": proc.stderr,
         }
     except subprocess.TimeoutExpired as te:
         logger.error("Command timeout: %r (timeout=%s)", cmd, timeout)
@@ -75,7 +62,7 @@ def ripgrep_search(
     pattern: str,
     path: str = ".",
     glob: List[str] | None = None,
-    max_results: int = 30,  # Reduced from 200 to prevent token overflow
+    max_results: int = 200,
 ) -> List[Dict[str, Any]]:
     """
     Search using ripgrep with safe, fixed flags:
