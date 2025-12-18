@@ -1,8 +1,23 @@
+# Agent
 fastmcp
+anthropic
+
+# MCP Servers - Incident
 datadog-api-client
+requests
+python-dateutil
+
+# MCP Servers - Memory
+psycopg2-binary
+
+# MCP Servers - Code Indexer (file.py)
+whoosh
+
+# MCP Servers - Editor
+filelock
+
+# MCP Servers - Shell (no extra deps, uses stdlib)
+
+# Optional integrations
 PyGithub
 jira
-requests
-psycopg2-binary
-python-dateutil
-anthropic

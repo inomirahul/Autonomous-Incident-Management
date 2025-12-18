@@ -60,3 +60,7 @@ DD_APP_KEY=...
 ### Run agent
 
 `docker compose up --build`
+
+### Run agent locally (no Docker)
+
+`./run_local.sh`
