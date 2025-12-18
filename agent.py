@@ -40,7 +40,6 @@ You are an autonomous incident-response agent.
 - On termination, respond only with a concise explanation of why the task cannot be completed.
 - Do not continue analysis, exploration, or tool usage after the limit.
 - Do not attempt partial solutions beyond the limit.
-- Must exit after task completion.
 
 ## Failure Mode
 - If required information, access, or determinism is insufficient, exit immediately.
@@ -56,6 +55,15 @@ You are an autonomous incident-response agent.
 5. Create GitHub Pull request with clear branch name, clear commit message, clear title, and description
 6. Persist incident, actions, and reflections to memory
 7. Exit after task completion without further analysis.
+
+
+## Rules
+1. The first priority for searching code is to use the code_index tool.
+2. If you get a highlighted snippet, grep only the required snippet based on the line numbers.
+3. Avoid looking into the following files and directories: .env, venv, .venv, env, __pycache__, node_modules, site-packages, dist, build, .idea, .vscode.
+4.You can determine the repository name from the incident description or the code_index tool.
+5. When you figure out repository name, only search that repository and make changes only in that repository.
+
 
 ## Constraints
 
@@ -232,7 +240,7 @@ async def run_agent():
             "recall_memory",
             {
                 "agent_id": AGENT_ID,
-                "limit": 10,
+                "limit": 1,
             },
         )
 
@@ -250,6 +258,10 @@ async def run_agent():
             {
                 "role": "user",
                 "content": "Do not send the entire codebase or full file code to LLM. Provide only the minimal, relevant code segments required to diagnose and fix the issue. The LLM should receive targeted excerpts aligned to the specific failure mode, not a full dump. This constrains reasoning, reduces noise, and improves fix accuracy",
+            },
+            {
+                "role": "user",
+                "content": "Always no matter what search relevant code using code_index tool before taking any action and figure out the repository name first.",
             }
         ]
 
@@ -267,7 +279,7 @@ async def run_agent():
                 system=system_prompt,
                 messages=messages,
                 tools=claude_tools,
-                max_tokens=2048,
+                max_tokens=4096,
             )
             latency_ms = int((time.time() - t0) * 1000)
 

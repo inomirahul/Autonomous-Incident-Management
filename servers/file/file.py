@@ -13,7 +13,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(
 log = logging.getLogger("whoosh_code_index")
 
 # Config from env
-INDEX_DIR = os.getenv("CODE_INDEX_DIR", "/code_index")
+INDEX_DIR = os.getenv("CODE_INDEX_DIR")
 CODE_INDEX_REPOS = os.getenv("CODE_INDEX_REPOS")        # comma separated names
 CODE_INDEX_PATHS = os.getenv("CODE_INDEX_PATHS")        # comma separated container paths
 EXCLUDE_DIRS = {
@@ -101,11 +101,11 @@ def index_repo_impl(repo_name: str, root_path: str) -> dict:
                 skipped_files += 1
                 continue
 
+            full_path_norm = os.path.normpath(os.path.abspath(full_path))
             # path stored as repo:relative_path
-            rel = os.path.relpath(full_path, root_path)
             writer.add_document(
                 repo=repo_name,
-                path=f"{repo_name}:{rel}",
+                path=full_path_norm,
                 filename=name,
                 language=EXTENSION_LANGUAGE_MAP[ext],
                 content=content,
@@ -144,7 +144,7 @@ def search_code(query_string: str, repo: str | None = None, limit: int = 10) -> 
         results = searcher.search(query, limit=limit)
         log.info("Search executed | hits=%d", len(results))
 
-        results.fragmenter = ContextFragmenter(maxchars=300, surround=50)
+        results.fragmenter = ContextFragmenter(maxchars=200, surround=40)
 
         for hit in results:
             snippet = hit.highlights("content")
@@ -156,7 +156,7 @@ def search_code(query_string: str, repo: str | None = None, limit: int = 10) -> 
                 "snippet": snippet,
                 "score": float(hit.score)
             })
-
+    log.info("Search results: %s", results_out)
     log.info("search_code completed | returned=%d", len(results_out))
     return results_out
 
@@ -199,7 +199,7 @@ def run_index_all_from_env():
 
 
 if __name__ == "__main__":
-    run_index_all_from_env()
+    # run_index_all_from_env()
     mcp.run(
         transport="http",
         host="0.0.0.0",
