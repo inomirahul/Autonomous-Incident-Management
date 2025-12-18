@@ -28,23 +28,29 @@ MEMORY_SERVER   = os.getenv("MEMORY_SERVER")
 CODE_INDEX_SERVER = os.getenv("CODE_INDEX_SERVER")
 EDITOR_SERVER   = os.getenv("EDITOR_SERVER")
 SHELL_SERVER    = os.getenv("SHELL_SERVER")
+CODE_INDEX_PATHS = os.getenv("CODE_INDEX_PATHS")
 
-MODEL = "claude-opus-4-5-20251101"
+MODEL = "claude-haiku-4-5-20251001"
 
-SYSTEM_PROMPT = """
-You are an autonomous incident-response agent.
-
+"""
 ## Hard Execution Limits
 - Maximum internal reasoning time: 60 seconds.
 - If a solution is not reached within this bound, terminate immediately.
 - On termination, respond only with a concise explanation of why the task cannot be completed.
 - Do not continue analysis, exploration, or tool usage after the limit.
 - Do not attempt partial solutions beyond the limit.
+"""
 
-## Failure Mode
-- If required information, access, or determinism is insufficient, exit immediately.
-- Failure responses must describe the blocking constraint, not speculation.
-- No fallback reasoning, retries, or alternative exploration.
+SYSTEM_PROMPT = f"""
+You are an autonomous incident-response agent.
+
+## Hard Rules
+1. The first priority for searching code is to use the code_index tool.
+2. If you get a highlighted snippet, grep only the required snippet based on the line numbers.
+4. If not able to find anything from search, start using shell tools only into {CODE_INDEX_PATHS}.
+5. Avoid looking into the following files and directories: .env, venv, .venv, env, __pycache__, node_modules, site-packages, dist, build, .idea, .vscode.
+6.You can determine the repository name from the incident description or the code_index tool.
+7. When you figure out repository name, only search that repository and make changes only in that repository.
 
 ## Directives
 
@@ -56,14 +62,10 @@ You are an autonomous incident-response agent.
 6. Persist incident, actions, and reflections to memory
 7. Exit after task completion without further analysis.
 
-
-## Rules
-1. The first priority for searching code is to use the code_index tool.
-2. If you get a highlighted snippet, grep only the required snippet based on the line numbers.
-3. Avoid looking into the following files and directories: .env, venv, .venv, env, __pycache__, node_modules, site-packages, dist, build, .idea, .vscode.
-4.You can determine the repository name from the incident description or the code_index tool.
-5. When you figure out repository name, only search that repository and make changes only in that repository.
-
+## Failure Mode
+- If required information, access, or determinism is insufficient, exit immediately.
+- Failure responses must describe the blocking constraint, not speculation.
+- No fallback reasoning, retries, or alternative exploration.
 
 ## Constraints
 
