@@ -37,32 +37,30 @@ def write_memory(
 def recall_memory(
     agent_id: str,
     memory_type: str | None = None,
+    query: str | None = None,
     limit: int = 20
 ) -> List[Dict[str, Any]]:
+    sql = """
+        SELECT memory_type, content, created_at
+        FROM agent_memory
+        WHERE agent_id = %s
+    """
+    params = [agent_id]
+
+    if memory_type:
+        sql += " AND memory_type = %s"
+        params.append(memory_type)
+
+    if query:
+        sql += " AND content ILIKE %s"
+        params.append(f"%{query}%")
+
+    sql += " ORDER BY created_at DESC LIMIT %s"
+    params.append(limit)
+
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        if memory_type:
-            cur.execute(
-                """
-                SELECT memory_type, content, created_at
-                FROM agent_memory
-                WHERE agent_id = %s AND memory_type = %s
-                ORDER BY created_at DESC
-                LIMIT %s
-                """,
-                (agent_id, memory_type, limit)
-            )
-        else:
-            cur.execute(
-                """
-                SELECT memory_type, content, created_at
-                FROM agent_memory
-                WHERE agent_id = %s
-                ORDER BY created_at DESC
-                LIMIT %s
-                """,
-                (agent_id, limit)
-            )
-        return cur.fetchall()
+        cur.execute(sql, params)
+        return cur.fetchall()  
 
 if __name__ == "__main__":
     mcp.run(

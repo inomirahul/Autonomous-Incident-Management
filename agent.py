@@ -3,6 +3,8 @@ import os
 import time
 import logging
 from typing import Any
+from utils.memory_utils import should_store_memory, normalize_memory
+from utils.monitor_context import MonitorContext
 
 from fastmcp import Client
 from anthropic import AsyncAnthropic
@@ -42,39 +44,34 @@ MODEL = "claude-haiku-4-5-20251001"
 """
 
 SYSTEM_PROMPT = f"""
-You are an autonomous incident-response agent.
+You are an autonomous incident-response agent. Be concise and focused.
+
+## Context Efficiency Rules
+- NEVER request entire files - use line ranges only
+- ALWAYS use search_code_focused for targeted results
+- MANDATORY: Use code_index tool first before any other action
+- Minimize tool calls - combine related searches
 
 ## Hard Rules
-1. The first priority for searching code is to use the code_index tool.
-2. If you get a highlighted snippet, grep only the required snippet based on the line numbers.
-4. If not able to find anything from search, start using shell tools only into {CODE_INDEX_PATHS}.
-5. Avoid looking into the following files and directories: .env, venv, .venv, env, __pycache__, node_modules, site-packages, dist, build, .idea, .vscode.
-6.You can determine the repository name from the incident description or the code_index tool.
-7. When you figure out repository name, only search that repository and make changes only in that repository.
+1. Use code_index tool first for searching
+2. Request only relevant code sections (max 50 lines)
+3. Focus on {CODE_INDEX_PATHS} repositories only
+4. Avoid: .env, venv, __pycache__, node_modules, .git
 
-## Directives
-
-1. Investigate the incident
-2. Search relevant code
-3. Apply minimal fix but make sure changes in all relevant files
-4. Create Jira issue for tracking if appropriate tools are available
-5. Create GitHub Pull request with clear branch name, clear commit message, clear title, and description
-6. Persist incident, actions, and reflections to memory
-7. Exit after task completion without further analysis.
-
-## Failure Mode
-- If required information, access, or determinism is insufficient, exit immediately.
-- Failure responses must describe the blocking constraint, not speculation.
-- No fallback reasoning, retries, or alternative exploration.
+## Workflow
+1. Investigate incident (get latest only)
+2. Search relevant code (focused results)
+3. Read specific file sections (not entire files)
+4. Apply minimal fixes
+5. Create PR with clear description
+6. Store summary in memory (not full details)
+7. Exit immediately after completion
 
 ## Constraints
-
-- Do not ask questions
-- Do not speculate beyond the code
-- Act only through tools when action is required
-- Focus on factual structure
-- Never delete files; document removals in PR description instead
-- Make minimal required changes only
+- No questions or speculation
+- Factual responses only
+- Minimal context requests
+- Document file removals in PR, don't delete
 """
 
 claude = AsyncAnthropic()
@@ -242,6 +239,8 @@ async def run_agent():
             "recall_memory",
             {
                 "agent_id": AGENT_ID,
+                "query": None,      # or a concrete string
+                "memory_type": None,
                 "limit": 1,
             },
         )
@@ -254,16 +253,8 @@ async def run_agent():
 
         messages = [
             {
-                "role": "user",
-                "content": "Handle the most recent production incident end-to-end.",
-            },
-            {
-                "role": "user",
-                "content": "Do not send the entire codebase or full file code to LLM. Provide only the minimal, relevant code segments required to diagnose and fix the issue. The LLM should receive targeted excerpts aligned to the specific failure mode, not a full dump. This constrains reasoning, reduces noise, and improves fix accuracy",
-            },
-            {
-                "role": "user",
-                "content": "Always no matter what search relevant code using code_index tool before taking any action and figure out the repository name first.",
+                "role": "user", 
+                "content": "Handle the most recent production incident end-to-end."
             }
         ]
 
@@ -276,10 +267,15 @@ async def run_agent():
             })
 
             t0 = time.time()
+
             response = await claude.messages.create(
                 model=MODEL,
                 system=system_prompt,
-                messages=messages,
+                messages=MonitorContext(
+                    max_context_tokens=3000,
+                    keep_last_user=2,
+                    keep_last_assistant=2,
+                ).prepare_context(messages),
                 tools=claude_tools,
                 max_tokens=4096,
             )
@@ -331,23 +327,19 @@ async def run_agent():
                         shell_tools,
                     )
 
-                    if memory_type:
+                    if memory_type and should_store_memory(memory_type, result):
                         await memory.call_tool(
                             "write_memory",
                             {
                                 "agent_id": AGENT_ID,
                                 "memory_type": memory_type,
-                                "content": {
-                                    "tool": tool_name,
-                                    "arguments": tool_args,
-                                    "result": result,
-                                },
+                                "content": normalize_memory(memory_type, result),
                             }
                         )
                         log.info("memory.write", extra={
                             "memory_type": memory_type,
                             "tool": tool_name,
-                        })
+                        })  
 
                     tool_result_blocks.append(
                         {
@@ -379,7 +371,7 @@ async def run_agent():
                 {
                     "agent_id": AGENT_ID,
                     "memory_type": "reflection",
-                    "content": {"summary": final_text},
+                    "content": normalize_memory(memory_type, result),
                 }
             )
 

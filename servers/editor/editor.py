@@ -15,13 +15,32 @@ def _lock_path(path: str) -> str:
     return str(LOCK_DIR / f"{safe}.lock")
 
 @mcp.tool()
-def read_file(path: str, encoding: str = "utf-8") -> Dict[str, Any]:
+def read_file_excerpt(
+    path: str, 
+    start_line: int = 1, 
+    end_line: int | None = None,
+    max_lines: int = 50
+) -> Dict[str, Any]:
+    """Read only specific lines from a file to minimize context."""
     p = Path(path)
     if not p.exists():
-        return {"ok": False, "error": "not_found", "path": path}
+        return {"ok": False, "error": "not_found"}
+    
     try:
-        text = p.read_text(encoding=encoding, errors="ignore")
-        return {"ok": True, "path": str(p), "content": text}
+        lines = p.read_text(encoding="utf-8", errors="ignore").split('\n')
+        
+        if end_line is None:
+            end_line = min(start_line + max_lines, len(lines))
+        
+        excerpt = '\n'.join(lines[start_line-1:end_line])
+        
+        return {
+            "ok": True,
+            "path": path,
+            "excerpt": excerpt,
+            "line_range": f"{start_line}-{end_line}",
+            "total_lines": len(lines)
+        }
     except Exception as e:
         return {"ok": False, "error": str(e)}
 

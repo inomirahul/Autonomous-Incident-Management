@@ -221,7 +221,7 @@ PIDS+=($!)
 
 echo ""
 echo "All MCP servers started. Waiting 10 seconds for initialization..."
-sleep 10
+sleep 7
 
 echo ""
 echo "=============================================="
